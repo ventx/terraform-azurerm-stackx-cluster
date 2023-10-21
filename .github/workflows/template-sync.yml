@@ -30,4 +30,3 @@ jobs:
           source_repo_path: ventx/stackx-template-terraform
           pr_labels: chore,template-sync
           pr_title: "chore: upstream merge template repository"
-
