@@ -1,0 +1,125 @@
+name: release-please
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  id-token: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: release-please
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ARM_CLIENT_ID: "${{ secrets.AZURE_CLIENT_ID }}"
+      ARM_SKIP_PROVIDER_REGISTRATION: true
+      ARM_SUBSCRIPTION_ID: "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+      ARM_TENANT_ID: "${{ secrets.AZURE_TENANT_ID }}"
+      ARM_USE_OIDC: true
+      TFDIR: .
+      TF_VAR_rg_name: github-oidc
+      TF_VAR_subnet_ids: '["test"]'
+      TFVER: 1.1.2 # Rover uses Terraform 1.1.2, so we need to use the same version for the plan file
+    steps:
+      - name: Generate token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.PRIVATE_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false # required for ad-m/github-push-action with GH App Token
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Configure AWS credentials
+        if: startsWith(github.repository, 'ventx/terraform-aws-')
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+          role-to-assume: ${{ secrets.AWS_GH_OIDC }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.TFVER }}
+
+      - name: Terraform Init
+        run: terraform -chdir=${{ env.TFDIR }} init
+
+      - name: Terraform Plan
+        id: plan
+        run: terraform -chdir=${{ env.TFDIR }} plan -no-color -input=false -out=plan.out
+
+      - name: stackx-action-rover-terraform
+        uses: ventx/stackx-action-rover-terraform@v1
+
+      - name: Cleanup
+        id: cleanup
+        run: rm -f rover.zip
+
+      - name: Move rover image to docs directory
+        run: |
+          mv ${{ env.TFDIR }}/rover.png docs/images/screenshot2.png
+          mv ${{ env.TFDIR }}/rover.svg docs/images/screenshot2.svg
+
+      - name: Set Versions
+        run: |
+          PYTHONVER=$(grep .tool-versions -e "python" | sed "s/python \(.*\)/\1/")
+          echo "PYTHONVERSION=$PYTHONVER" >> $GITHUB_ENV
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHONVERSION }}
+
+      - name: Setup Graphviz
+        uses: ts-graphviz/setup-graphviz@v1
+
+      - name: Install diagrams
+        run: pip install diagrams
+
+      - name: Generate Diagram
+        id: diagram
+        run: python docs/images/diagram.py
+
+      - name: Move Diagram to docs/images directory
+        run: mv screenshot1.png docs/images/screenshot1.png
+
+      - name: stackx-action-readme
+        id: readme
+        uses: ventx/stackx-action-readme-templates@v1
+        with:
+          terraform: 'true'
+
+      - name: terraform-docs
+        uses: terraform-docs/gh-actions@v1
+
+      - name: Commit files
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "ventx-bot"
+          git status --porcelain
+          git commit -a -m "[skip ci] Update README.md and terraform-docs"
+
+      - name: Push changes
+        uses: ad-m/github-push-action@master
+        with:
+          github_token: ${{ steps.app-token.outputs.token }}
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: release-please
+        uses: google-github-actions/release-please-action@v3
+        with:
+          release-type: terraform-module
+          extra-files: |
+            docs/README.yaml
